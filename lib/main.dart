@@ -3,6 +3,8 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:math';
 
 void main() => runApp(const MyApp());
 
@@ -32,32 +34,44 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<Map<String, String>> _messages = [];
   bool _isLoading = false;
 
-  // 🔊 Inicialización de voz y texto
   late stt.SpeechToText _speech;
   bool _isListening = false;
   String _voiceInput = "";
+
   final FlutterTts _tts = FlutterTts();
+  String? _userId;
 
   @override
   void initState() {
     super.initState();
     _speech = stt.SpeechToText();
     _initTTS();
+    _loadOrCreateUserId();
   }
 
-  // ⚙️ Configuración inicial del TTS
+  // 🧍 Cargar o generar ID de usuario
+  Future<void> _loadOrCreateUserId() async {
+    final prefs = await SharedPreferences.getInstance();
+    String? savedId = prefs.getString('userId');
+    if (savedId == null) {
+      savedId = 'user_${Random().nextInt(100000)}';
+      await prefs.setString('userId', savedId);
+    }
+    setState(() => _userId = savedId);
+    print('🧍 ID de usuario: $_userId');
+  }
+
+  // ⚙️ Configurar TTS
   Future<void> _initTTS() async {
     await _tts.setLanguage("es-ES");
     await _tts.setSpeechRate(0.9);
     await _tts.setPitch(1.0);
-
-    // 🔁 Cuando termina de hablar, volver a escuchar
     _tts.setCompletionHandler(() {
       _startListening();
     });
   }
 
-  // 🎙️ Iniciar reconocimiento de voz
+  // 🎙️ Escuchar voz
   Future<void> _startListening() async {
     bool available = await _speech.initialize(
       onStatus: (status) {
@@ -69,14 +83,13 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       },
       onError: (error) {
-        print('Error al escuchar: $error');
+        print('❌ Error al escuchar: $error');
         setState(() => _isListening = false);
       },
     );
 
     if (available) {
       setState(() => _isListening = true);
-
       _speech.listen(
         onResult: (result) {
           setState(() {
@@ -86,21 +99,22 @@ class _ChatScreenState extends State<ChatScreen> {
         },
         listenFor: const Duration(seconds: 10),
         pauseFor: const Duration(seconds: 2),
-        localeId: "es_ES", // o "es_PE" si prefieres
+        localeId: "es_ES",
       );
     } else {
       print("No se pudo inicializar el reconocimiento de voz.");
     }
   }
 
-  // 🛑 Detener escucha
   void _stopListening() {
     _speech.stop();
     setState(() => _isListening = false);
   }
 
-  // 💬 Enviar mensaje al backend + respuesta con voz
+  // 💬 Enviar mensaje al backend (n8n)
   Future<void> sendMessage() async {
+    if (_userId == null) return;
+
     final message = _controller.text.trim();
     if (message.isEmpty) return;
 
@@ -111,36 +125,60 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
     try {
-      final url = Uri.parse('http://192.168.1.13:8000/ask'); // tu endpoint real
+      final url = Uri.parse('https://williansmalque.app.n8n.cloud/webhook-test/assistant');
+
+      final body = {
+        "userId": _userId,
+        "inputType": "text",
+        "message": message,
+        "audioBase64": "",
+        "responseType": "text"
+      };
+
+      print("📤 Enviando a n8n: ${jsonEncode(body)}");
+
       final response = await http.post(
         url,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'message': message}),
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'User-Agent': 'FlutterApp/1.0'
+        },
+        body: jsonEncode(body),
       );
+
+      print("📥 Código de respuesta: ${response.statusCode}");
+      print("📦 Respuesta: ${response.body}");
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        final reply = data['reply'] ?? 'Error al obtener respuesta.';
+        final reply = data['output'] ?? data['reply'] ?? 'No se recibió respuesta del asistente.';
 
         setState(() {
           _messages.add({'role': 'ai', 'text': reply});
           _isLoading = false;
         });
 
-        // 🔊 Hablar respuesta con TTS
         await _tts.speak(reply);
       } else {
         setState(() {
-          _messages.add({'role': 'ai', 'text': 'Error del servidor (${response.statusCode})'});
+          _messages.add({
+            'role': 'ai',
+            'text': 'Error del servidor (${response.statusCode})'
+          });
           _isLoading = false;
         });
       }
-    } catch (e) {
+    } catch (e, stacktrace) {
+      print('❌ Error al enviar mensaje: $e');
+      print('🧱 Stacktrace: $stacktrace');
       setState(() {
-        _messages.add({'role': 'ai', 'text': 'Error de conexión con el servidor.'});
+        _messages.add({
+          'role': 'ai',
+          'text': 'Error de conexión: $e'
+        });
         _isLoading = false;
       });
-      print('Error al enviar mensaje: $e');
     }
   }
 
